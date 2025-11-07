@@ -378,7 +378,7 @@ top_n_bar = st.sidebar.number_input("Top N Donors/Recipients", min_value=1, max_
 # -->
 
 st.sidebar.subheader("Histograms")
-histo_label_width = st.sidebar.slider("Histogram Label Wrap Width", 10, 50, 25, 1)
+histo_label_width = st.sidebar.slider("Histogram Label Wrap Width", 10, 50, 50, 1)
 
 
 # =========================
@@ -399,7 +399,7 @@ st.title("Funding for Transport-related Activities (CTF-S 2021-2022)")
 # METRICS
 # =========================
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Records included", f"{len(df):,}")
+m1.metric("Records", f"{len(df):,}")
 m2.metric("Total amount in USD (filtered)", money_full(df[VAL_COL_NORM].sum()))
 m3.metric("Unique sources", f"{df['Funding economy'].nunique():,}")
 m4.metric("Unique recipients", f"{df['Recipient country or region'].nunique():,}")
