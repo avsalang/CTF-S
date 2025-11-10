@@ -1,20 +1,7 @@
 # app.py
-# Streamlit dashboard for transport-related support (CTF-S)
-# - NaN-safe, ordered Sankey (donors by outgoing, recipients by incoming)
-# - Stylized colors (donor/recipient palettes + rgba link transparency)
-# - Year filter (2021 / 2022 / both)
-# - Scope filter (Individual economies only / All entities)
-# - Top N donors & recipients (bar plots, configurable)
-# - Top 3 donors & recipients (text summary)
-# - Word map from Title field (TW Cen MT font, default colors)
-# - Histograms for Sector_text1 / Subsector_text1 (black text, TW Cen MT font)
-# - Raw table tab + CSV download
-# - Readability controls for Sankey labels (ISO3 vs names, wrap/ellipsis, height)
-
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from pathlib import Path
 from wordcloud import WordCloud, STOPWORDS
 import matplotlib.pyplot as plt
 import re
@@ -23,23 +10,18 @@ import plotly.express as px
 
 st.set_page_config(page_title="Transport Funding (CTF-S) — Dashboard", layout="wide")
 
-# =========================
-# CONFIG
-# =========================
+# --- Config ---
 DEFAULT_FILE = "CTF-S transport related (see notes).xlsx"
 VAL_COL_NORM = "Value (USD)_normalized"
 VAL_COL_RAW = "Value (USD)"
 TITLE_COL = "Title of the project programme, activity or other"
-FONT_FAMILY = "TW Cen MT"  # <-- Set desired font
+FONT_FAMILY = "TW Cen MT"
 
 
-# =========================
-# HELPERS
-# =========================
+# --- Helpers ---
 def money(x: float) -> str:
-    """Format float as currency string."""
+    """Format float as currency string (B, M, K)."""
     try:
-        # Use 'M' for millions, 'K' for thousands for bar plot labels
         if x >= 1_000_000_000:
             return f"${x / 1_000_000_000:,.2f}B"
         if x >= 1_000_000:
@@ -50,22 +32,13 @@ def money(x: float) -> str:
     except Exception:
         return "-"
 
+
 def money_full(x: float) -> str:
     """Format float as full currency string for tooltips/summaries."""
     try:
         return f"${x:,.2f}"
     except Exception:
         return "-"
-
-
-import textwrap
-
-
-def wrap_label(text, width=22):
-    """Wrap labels to multiple lines for plotting."""
-    if not isinstance(text, str):
-        return text
-    return "<br>".join(textwrap.wrap(text, width=width))
 
 
 def hex_to_rgba(hex_color: str, alpha: float = 0.55) -> str:
@@ -92,11 +65,11 @@ def shorten_label(s: str, max_len: int = 14, wrap: bool = True) -> str:
 
 @st.cache_data(show_spinner=False)
 def load_data(path: str) -> pd.DataFrame:
+    """Load and preprocess the Excel data."""
     xls = pd.ExcelFile(path)
-    sheet = xls.sheet_names[0]  # first sheet (safe)
+    sheet = xls.sheet_names[0]  # first sheet
     df = pd.read_excel(path, sheet_name=sheet)
 
-    # normalized value
     if VAL_COL_NORM not in df.columns:
         if VAL_COL_RAW in df.columns:
             df[VAL_COL_NORM] = df[VAL_COL_RAW]
@@ -112,11 +85,14 @@ def load_data(path: str) -> pd.DataFrame:
 
 
 def filter_scope(df: pd.DataFrame, year_sel: str, individual_only: bool) -> pd.DataFrame:
+    """Apply year and scope filters to the dataframe."""
     sub = df.copy()
     if year_sel != "both":
         sub = sub[sub["Year"] == int(year_sel)]
+
     # keep only positive flows (ignore corrections)
     sub = sub[sub[VAL_COL_NORM] > 0]
+
     if individual_only:
         sub = sub[sub["is_indiv_donor"] & sub["is_indiv_recipient"]]
     return sub
@@ -124,8 +100,8 @@ def filter_scope(df: pd.DataFrame, year_sel: str, individual_only: bool) -> pd.D
 
 def sankey_stylized(
         df_flows: pd.DataFrame,
-        donor_label_col: str,  # "funding_economy_code" or "Funding economy"
-        recip_label_col: str,  # "recipient_economy_code" or "Recipient country or region"
+        donor_label_col: str,
+        recip_label_col: str,
         value_col: str,
         title: str,
         *,
@@ -136,26 +112,18 @@ def sankey_stylized(
         wrap_labels: bool = True,
         height_px: int = 750
 ):
-    """
-    Ordered Sankey with 'Others' buckets:
-      - Donors sorted by total outgoing (desc)
-      - Recipients sorted by total incoming (desc)
-      - Edges beyond Top-N are grouped into:
-          * Others (donors) -> each top recipient
-          * each top donor -> Others (recipients)
-          * Others (donors) -> Others (recipients)
-    """
+    """Generate an ordered Sankey with 'Others' buckets and stylized colors."""
     OTH_DON = "(Other sources)"
     OTH_REC = "(Other recipients)"
     DONOR_MISS = "(Unspecified source)"
     RECIP_MISS = "(Unspecified recipient)"
 
-    # -------- 1) Sanitize labels --------
+    # 1) Sanitize labels
     dfw = df_flows.copy()
     dfw[donor_label_col] = dfw[donor_label_col].fillna(DONOR_MISS)
     dfw[recip_label_col] = dfw[recip_label_col].fillna(RECIP_MISS)
 
-    # -------- 2) Aggregate ALL edges, then prune by min_usd and split Top vs Rest --------
+    # 2) Aggregate ALL edges, then prune by min_usd and split Top vs Rest
     agg_all = (
         dfw.groupby([donor_label_col, recip_label_col], dropna=False)[value_col]
         .sum()
@@ -172,7 +140,7 @@ def sankey_stylized(
     donors_top = set(agg_top[donor_label_col].tolist())
     recips_top = set(agg_top[recip_label_col].tolist())
 
-    # -------- 3) Build 'Others' aggregates from the REST edges --------
+    # 3) Build 'Others' aggregates from the REST edges
     others_chunks = []
     if not agg_rest.empty:
         a = agg_rest[~agg_rest[donor_label_col].isin(donors_top) & agg_rest[recip_label_col].isin(recips_top)]
@@ -201,12 +169,12 @@ def sankey_stylized(
     else:
         agg_final = agg_top.copy()
 
-    # -------- 4) Prepare lists for Sankey links --------
+    # 4) Prepare lists for Sankey links
     donors = agg_final[donor_label_col].tolist()
     recips = agg_final[recip_label_col].tolist()
     values = agg_final[value_col].tolist()
 
-    # -------- 5) ORDER NODES by size (descending) within each side --------
+    # 5) ORDER NODES by size (descending) within each side
     donor_totals = (
         agg_final.groupby(donor_label_col)[value_col]
         .sum()
@@ -229,7 +197,7 @@ def sankey_stylized(
     recipient_list_unique = move_to_end(recipient_list_unique, OTH_REC)
     all_nodes_full = donor_list_unique + recipient_list_unique
 
-    # -------- 6) Compact display labels (keep full for hover) --------
+    # 6) Compact display labels (keep full for hover)
     if compact_labels:
         all_nodes_shown = [shorten_label(s, max_label_len, wrap_labels) for s in all_nodes_full]
     else:
@@ -242,7 +210,7 @@ def sankey_stylized(
     except KeyError as e:
         raise KeyError(f"Label not found in node_index: {e}.")
 
-    # -------- 7) Colors (donor vs recipient palettes; Others in gray) --------
+    # 7) Colors (donor vs recipient palettes; Others in gray)
     donor_palette = [
         "#1f77b4", "#2ca02c", "#d62728", "#9467bd", "#8c564b",
         "#17becf", "#7f7f7f", "#bcbd22", "#e377c2"
@@ -261,26 +229,17 @@ def sankey_stylized(
     color_map[OTH_REC] = OTHERS_COLOR
     node_colors = [color_map.get(n, "#7f7f7f") for n in all_nodes_full]
 
-    def hex_to_rgba(hex_color: str, alpha: float = 0.55) -> str:
-        hc = hex_color.strip().lstrip("#")
-        if len(hc) != 6:
-            return f"rgba(127,127,127,{alpha})"
-        r = int(hc[0:2], 16);
-        g = int(hc[2:4], 16);
-        b = int(hc[4:6], 16)
-        return f"rgba({r},{g},{b},{alpha})"
-
     link_colors = [hex_to_rgba(color_map.get(donors[i], "#7f7f7f"), 0.55) for i in range(len(donors))]
 
-    # -------- 8) Figure (styled) --------
+    # 8) Figure (styled)
     bgcolor = "white"
-    fontcol = "black"  # <-- SET TO BLACK
+    fontcol = "black"
     node_customdata = [[full] for full in all_nodes_full]
 
     fig = go.Figure(data=[go.Sankey(
         arrangement="snap",
         node=dict(
-            pad=45, thickness=22,  # <-- Increased padding
+            pad=45, thickness=22,
             label=all_nodes_shown,
             color=node_colors,
             line=dict(color="black", width=0.4),
@@ -295,39 +254,35 @@ def sankey_stylized(
     )])
 
     fig.update_layout(
-        # <-- FONT FAMILY AND COLOR SET
         title=dict(text=title, font=dict(size=22, color=fontcol, family=FONT_FAMILY), x=0.5),
         font=dict(color=fontcol, size=14, family=FONT_FAMILY),
-        # -->
         plot_bgcolor=bgcolor, paper_bgcolor=bgcolor,
         margin=dict(l=20, r=20, t=65, b=20),
         height=height_px
     )
 
-    # <-- ADDED
-    # Explicitly set the node label text font to ensure it's simple black
+    # Explicitly set the node label text font
     fig.update_traces(textfont=dict(color="black", family=FONT_FAMILY, size=14))
-    # -->
 
     return fig, float(agg_final[value_col].sum())
 
 
 def make_wordcloud(text_series: pd.Series, width=1200, height=480, bg="white"):
+    """Generate a WordCloud object from a series of text."""
     text = " ".join([str(t) for t in text_series.dropna().tolist()])
     text = re.sub(r"[^\w\s-]", " ", text)
     stop = set(STOPWORDS) | {"project", "programme", "program", "activity", "support", "undp", "national"}
 
-    font_path_win = "C:/Windows/Fonts/TWCenMT.ttf"  # Standard Windows path
+    font_path_win = "C:/Windows/Fonts/TWCenMT.ttf"
 
     try:
-        # Try with specific font, but default colors
+        # Try with specific font, default colors
         wc = WordCloud(
             width=width, height=height,
             background_color=bg,
             stopwords=stop,
             collocations=False,
             font_path=font_path_win
-            # <-- color_func removed to restore default colors
         )
         return wc.generate(text)
     except Exception as e:
@@ -339,22 +294,11 @@ def make_wordcloud(text_series: pd.Series, width=1200, height=480, bg="white"):
             background_color=bg,
             stopwords=stop,
             collocations=False
-            # <-- color_func removed to restore default colors
         )
         return wc.generate(text)
-    # -->
 
 
-def clean_text_counts(s: pd.Series, top_n=30):
-    s2 = s.fillna("").astype(str).str.strip()
-    mask = (s2 != "") & (~s2.str.upper().isin(["NA", "NR"]))
-    counts = s2[mask].value_counts().head(top_n)
-    return counts
-
-
-# =========================
-# SIDEBAR (with readability controls)
-# =========================
+# --- Sidebar Controls ---
 st.sidebar.header("Controls")
 
 data_path = st.sidebar.text_input("Excel file path", value=DEFAULT_FILE)
@@ -362,7 +306,6 @@ year_sel = st.sidebar.selectbox("Year", ["both", "2021", "2022"], index=0)
 scope_sel = st.sidebar.selectbox("Scope", ["Individual economies", "All entities"], index=0)
 
 st.sidebar.subheader("Sankey Diagram")
-# Label readability options
 use_iso = st.sidebar.checkbox("Use ISO3 labels in Sankey", value=True)
 compact_labels = st.sidebar.checkbox("Compact Sankey labels (wrap/ellipsis)", value=True)
 max_label_len = st.sidebar.slider("Max label length", 8, 30, 14, 1)
@@ -372,18 +315,13 @@ min_usd = st.sidebar.number_input("Sankey: Min USD per edge", min_value=0.0, val
                                   format="%.0f")
 sankey_height = st.sidebar.slider("Sankey height (px)", 400, 1200, 800, 50)
 
-# <-- ADDED: Control for Top N Bar Plots
 st.sidebar.subheader("Top N Bar Plots")
 top_n_bar = st.sidebar.number_input("Top N Donors/Recipients", min_value=1, max_value=50, value=5, step=1)
-# -->
 
 st.sidebar.subheader("Histograms")
 histo_label_width = st.sidebar.slider("Histogram Label Wrap Width", 10, 50, 50, 1)
 
-
-# =========================
-# LOAD + FILTER
-# =========================
+# --- Load & Filter Data ---
 try:
     df_all = load_data(data_path)
 except Exception as e:
@@ -395,21 +333,17 @@ df = filter_scope(df_all, year_sel, individual_only)
 
 st.title("Funding for Transport-related Activities (CTF-S 2021-2022)")
 
-# =========================
-# METRICS
-# =========================
+# --- Metrics ---
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Records", f"{len(df):,}")
 m2.metric("Total amount in USD (filtered)", money_full(df[VAL_COL_NORM].sum()))
 m3.metric("Unique sources", f"{df['Funding economy'].nunique():,}")
 m4.metric("Unique recipients", f"{df['Recipient country or region'].nunique():,}")
 
-# =========================
-# TABS
-# =========================
+# --- Tabs ---
 tab1, tab2, tab3, tab4 = st.tabs(["Funding", "Word Map", "Sector Histograms", "Raw Table"])
 
-# ---- TAB 1: Sankey + Rankings
+# --- TAB 1: Sankey + Rankings ---
 with tab1:
     st.subheader("Flow of transport funding")
     if use_iso and scope_sel == "Individual economies":
@@ -436,13 +370,12 @@ with tab1:
         st.warning("No flows to plot with the current filters. Adjust Top N or Min USD.")
     else:
         st.plotly_chart(fig, use_container_width=True)
-        st.caption(f"Total amoutn (USD) represented in figure: **{money_full(total_in_sankey)}**")
+        st.caption(f"Total amount (USD) represented in figure: **{money_full(total_in_sankey)}**")
 
-    # <-- ADDED: Top N Bar Plots
     st.markdown("---")
     st.subheader(f"Top {top_n_bar} Sources & Recipients")
 
-    # --- Calculate Data for Bar Plots (and reuse for Top 3 summary) ---
+    # Calculate Data for Bar Plots (and reuse for Top 3 summary)
     if individual_only:
         donor_group = df[df["is_indiv_donor"]].groupby("Funding economy")
     else:
@@ -457,7 +390,7 @@ with tab1:
     recip_series_all = recip_group[VAL_COL_NORM].sum().sort_values(ascending=False)
     recip_series_bar = recip_series_all.head(top_n_bar)
 
-    # --- Plot Bar Charts ---
+    # Plot Bar Charts
     c1_bar, c2_bar = st.columns(2)
 
     with c1_bar:
@@ -465,13 +398,12 @@ with tab1:
         if donor_series_bar.empty:
             st.info("No donors found for current scope/filters.")
         else:
-            # Sort ascending for horizontal bar plot (biggest at top)
             data_to_plot = donor_series_bar.sort_values(ascending=True)
             fig_donor_bar = px.bar(
                 data_to_plot,
                 orientation="h",
                 labels={"value": "Total Value (USD)", "index": "Donor"},
-                text=data_to_plot.apply(money) # Use abbreviated money format
+                text=data_to_plot.apply(money)
             )
             fig_donor_bar.update_layout(
                 yaxis_title=None,
@@ -482,7 +414,6 @@ with tab1:
                 showlegend=False,
                 plot_bgcolor="white"
             )
-            # Add full value to hover template
             fig_donor_bar.update_traces(
                 textposition='outside',
                 hovertemplate='<b>%{label}</b><br>Value: %{customdata}<extra></extra>',
@@ -495,13 +426,12 @@ with tab1:
         if recip_series_bar.empty:
             st.info("No recipients found for current scope/filters.")
         else:
-            # Sort ascending for horizontal bar plot (biggest at top)
             data_to_plot = recip_series_bar.sort_values(ascending=True)
             fig_recip_bar = px.bar(
                 data_to_plot,
                 orientation="h",
                 labels={"value": "Total Value (USD)", "index": "Recipient"},
-                text=data_to_plot.apply(money) # Use abbreviated money format
+                text=data_to_plot.apply(money)
             )
             fig_recip_bar.update_layout(
                 yaxis_title=None,
@@ -515,14 +445,12 @@ with tab1:
             # Add full value to hover template
             fig_recip_bar.update_traces(
                 textposition='outside',
-                hovertemplate='<b>%{label}</b><br>Value: %{customdata}<extra></st.caption(f"Total amoutn (USD) represented in figure: **{money_full(total_in_sankey)}**")ra>',
+                hovertemplate='<b>%{label}</b><br>Value: %{customdata}<extra></extra>',
                 customdata=data_to_plot.apply(money_full)
             )
             st.plotly_chart(fig_recip_bar, use_container_width=True)
-    # -->
 
-
-# ---- TAB 2: Word Map (from Titles)
+# --- TAB 2: Word Map (from Titles) ---
 with tab2:
     st.subheader("Project keywords")
     if TITLE_COL not in df.columns or df[TITLE_COL].dropna().empty:
@@ -534,19 +462,20 @@ with tab2:
         ax.axis("off")
         st.pyplot(fig_wc, clear_figure=True)
 
-# ---- TAB 3: Sector / Subsector histograms
+# --- TAB 3: Sector / Subsector histograms ---
 with tab3:
     st.subheader("Sector distribution")
 
 
     def wrap_label(text, width=25):
-        import textwrap
+        """Wrap labels with <br> for plotly."""
         if not isinstance(text, str):
             return text
         return "<br>".join(textwrap.wrap(text, width=width))
 
 
     def get_clean_counts(series, top_n=30, label_width=25):
+        """Clean a text series, get value counts, and wrap labels."""
         if series.isna().all():
             return pd.Series(dtype=int)
         s = (
@@ -562,9 +491,7 @@ with tab3:
         return counts
 
 
-    # ---------------------------
     # Sector_text1 Horizontal Bar
-    # ---------------------------
     if "Sector_text1" in df.columns:
         counts1 = get_clean_counts(df["Sector_text1"], top_n=30, label_width=histo_label_width)
         if counts1.empty:
@@ -581,18 +508,16 @@ with tab3:
                 margin=dict(l=20, r=20, t=50, b=20),
                 xaxis_title="Count",
                 yaxis_title="Sector",
-                yaxis=dict(automargin=True),  # Avoid label overlap
-                font_family=FONT_FAMILY,  # <-- SET FONT
-                font_color="black",  # <-- SET COLOR
+                yaxis=dict(automargin=True),
+                font_family=FONT_FAMILY,
+                font_color="black",
                 plot_bgcolor="white"
             )
             st.plotly_chart(fig_sec, use_container_width=True)
     else:
         st.info("Column 'Sector_text1' not found.")
 
-    # --------------------------------
     # Subsector_text1 Horizontal Bar
-    # --------------------------------
     st.subheader("Subsector distribution")
 
     if "Subsector_text1" in df.columns:
@@ -611,16 +536,16 @@ with tab3:
                 margin=dict(l=20, r=20, t=50, b=20),
                 xaxis_title="Count",
                 yaxis_title="Subsector",
-                yaxis=dict(automargin=True),  # Avoid label overlap
-                font_family=FONT_FAMILY,  # <-- SET FONT
-                font_color="black",  # <-- SET COLOR
+                yaxis=dict(automargin=True),
+                font_family=FONT_FAMILY,
+                font_color="black",
                 plot_bgcolor="white"
             )
             st.plotly_chart(fig_sub, use_container_width=True)
     else:
         st.info("Column 'Subsector_text1' not found.")
 
-# ---- TAB 4: Raw Table
+# --- TAB 4: Raw Table ---
 with tab4:
     st.subheader("Raw Table (Filtered)")
     st.dataframe(df, use_container_width=True)
